@@ -1,29 +1,22 @@
-# -*- coding: utf-8 -*-
-'''
-@author: Md Rezwanul Haque
-'''
-#---------------------------------------------------------------
-# Imports
-#---------------------------------------------------------------
+"""K-fold training and evaluation entry point for AMDD on D-Vlog."""
+
 import warnings
 warnings.filterwarnings('ignore')
-import os 
+import os
 import argparse
 import yaml
-from datetime import datetime 
+from datetime import datetime
 from termcolor import colored
 import torch
 import numpy as np
 import random
 from tqdm import tqdm
-from models import AMMD, CombinedLoss
-from datasets import get_dvlog_dataloader, kfold_get_dvlog_dataloader
-from utils import plot_confusion_matrix, plot_confusion_matrix_mean
+from models import AMDD, CombinedLoss
+from datasets import get_dvlog_dataloader
 from torch.utils.data import ConcatDataset, Subset, DataLoader
 from sklearn.model_selection import KFold
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-# Early stopping implementation
+
 class EarlyStopping:
     def __init__(self, patience=15, delta=0, verbose=False, save_path=None):
         self.patience = patience
@@ -63,24 +56,16 @@ class EarlyStopping:
 
 
 def collate_fn(batch):
-    # Assuming x is the data and y is the label
     data, labels = zip(*batch)
-    # Example: pad data to max length in the batch
     max_length = max(d.shape[0] for d in data)
     padded_data = [np.pad(d, ((0, max_length - d.shape[0]), (0, 0)), mode='constant') for d in data]
     return torch.tensor(padded_data, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
-def LOG_INFO(msg,mcolor='blue'):
-    '''
-        prints a msg/ logs an update
-        args:
-            msg     =   message to print
-            mcolor  =   color of the msg    
-    '''
-    print(colored("#LOG :", 'green') + colored(msg, mcolor)) # type: ignore
+def LOG_INFO(msg, mcolor='blue'):
+    print(colored("#LOG :", 'green') + colored(msg, mcolor))
 
-# Seed 
+
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -90,7 +75,6 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 set_seed(2024)
-#文件参数配置路径
 CONFIG_PATH = "./config.yaml"
 
 def parse_args():
@@ -106,7 +90,7 @@ def parse_args():
     parser.add_argument("--test_gender", type=str)
     parser.add_argument(
         "-m", "--model", type=str,
-        choices=["AMMD"]
+        choices=["AMDD"]
     )
     parser.add_argument("-e", "--epochs", type=int)
     parser.add_argument("-bs", "--batch_size", type=int)
@@ -115,18 +99,39 @@ def parse_args():
         "-sch", "--lr_scheduler", type=str,
         choices=["cos", "None",]
     )
-    # 修改设备参数解析，强制使用cuda:1
-    parser.add_argument("-d", "--device", type=str, default="cuda:1")
+    parser.add_argument(
+        "-d", "--device", type=str, default="cuda:0",
+        help="Device to use, e.g. cuda:0, cuda:1, or cpu"
+    )
+    parser.add_argument(
+        "-l", "--encoder_layers", type=int, default=8,
+        help="Number of Transformer encoder layers"
+    )
+    parser.add_argument(
+        "-ks", "--kernel_size", type=int, default=6,
+        help="Temporal convolution kernel size"
+    )
+    parser.add_argument(
+        "--loss_main_weight", type=float, default=0.9,
+        help="Weight for the main fusion loss"
+    )
+    parser.add_argument(
+        "--loss_aux_weight", type=float, default=0.05,
+        help="Weight for each auxiliary branch loss (msa / vtt)"
+    )
     parser.set_defaults(**config)
     args = parser.parse_args()
-    
-    # 强制转换为torch.device对象
-    args.device = torch.device("cuda:1")  # 直接硬编码为cuda:1
+
+    # Convert device string from CLI / config to torch.device
+    if isinstance(args.device, list):
+        args.device = args.device[0]
+    args.device = torch.device(args.device)
     return args
 
 def train_epoch(
     net, train_loader, loss_fn, optimizer, lr_scheduler, device, 
-    current_epoch, total_epochs
+    current_epoch, total_epochs,
+    loss_main_weight=0.9, loss_aux_weight=0.05,
 ):
     """One training epoch."""
     net.train()
@@ -158,7 +163,11 @@ def train_epoch(
             loss_msa = loss_fn(msa_pred, y.to(torch.float32), net)
             loss_vtt = loss_fn(vtt_pred, y.to(torch.float32), net)
          #   torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-            loss = 0.8*loss + 0.1*loss_msa + 0.1*loss_vtt
+            loss = (
+                loss_main_weight * loss
+                + loss_aux_weight * loss_msa
+                + loss_aux_weight * loss_vtt
+            )
             loss.backward()
             
             optimizer.step()
@@ -261,7 +270,7 @@ def val(
                 # Pass to Model
                 y_pred, msa_pred, vtt_pred = net(x)
 
-                ## ammd loss (total loss)
+                ## amdd loss (total loss)
                 loss = loss_fn(y_pred, y.to(torch.float32), net)
 
                 ## msa loss
@@ -364,10 +373,11 @@ def main():
     args = parse_args()
     LOG_INFO(args)
 
-    # 强制设置CUDA设备为cuda:1
-    torch.cuda.set_device(args.device)
+    if args.device.type == "cuda":
+        torch.cuda.set_device(args.device)
     LOG_INFO(f"Using device: {args.device}")
-    LOG_INFO(f"Available CUDA devices: {[f'cuda:{i}' for i in range(torch.cuda.device_count())]}")
+    if torch.cuda.is_available():
+        LOG_INFO(f"Available CUDA devices: {[f'cuda:{i}' for i in range(torch.cuda.device_count())]}")
 
     # Initialize K-Fold cross-validation
     train_loader = get_dvlog_dataloader(args.data_dir, "train", args.batch_size, args.train_gender)
@@ -385,12 +395,7 @@ def main():
     for fold, (train_indices, val_indices) in enumerate(kf.split(all_indices)):
         print(f"Fold {fold+1}: Train samples={len(train_indices)}, Val samples={len(val_indices)}")
         if len(val_indices) < args.batch_size:
-            print(f"警告：第 {fold+1} 折验证集样本不足！")
-    ##-----------------------------------------------------------------
-    # Initialize accumulators for TP, FP, TN, FN across all 10 folds
-    TP_sum, FP_sum, TN_sum, FN_sum = 0, 0, 0, 0
-    TP_msa_sum, FP_msa_sum, TN_msa_sum, FN_msa_sum = 0, 0, 0, 0
-    TP_vtt_sum, FP_vtt_sum, TN_vtt_sum, FN_vtt_sum = 0, 0, 0, 0
+            print(f"Warning: fold {fold+1} has insufficient validation samples.")
 
     fold_results = []
     for fold, (train_indices, val_indices) in enumerate(kf.split(all_indices)):
@@ -403,12 +408,20 @@ def main():
         val_loader_fold = DataLoader(val_subset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn,drop_last=True)
 
         # Construct the model
-        net = AMMD(d=256, l=6)
+        net = AMDD(
+            d=256,
+            l=args.encoder_layers,
+            temporal_kernel_size=args.kernel_size,
+        )
 
-        # 将模型移动到cuda:1
         net = net.to(args.device)
         LOG_INFO(f"[{args.model}] Total trainable parameters: {sum(p.numel() for p in net.parameters() if p.requires_grad)}", "cyan")
         LOG_INFO(f"Model device: {next(net.parameters()).device}")
+        LOG_INFO(
+            f"encoder_layers={args.encoder_layers}, kernel_size={args.kernel_size}, "
+            f"loss_weights=(main={args.loss_main_weight}, aux={args.loss_aux_weight})",
+            "cyan",
+        )
         
         # Set other training components
         loss_fn = CombinedLoss(lambda_reg=1e-5, focal_weight=0.5, l2_weight=0.5)
@@ -434,7 +447,9 @@ def main():
         for epoch in range(args.epochs):
             train_results = train_epoch(
                 net, train_loader_fold, loss_fn, optimizer, lr_scheduler, 
-                args.device, epoch, args.epochs
+                args.device, epoch, args.epochs,
+                loss_main_weight=args.loss_main_weight,
+                loss_aux_weight=args.loss_aux_weight,
             )
             val_results = val(net, val_loader_fold, loss_fn, args.device)
 
@@ -465,60 +480,13 @@ def main():
             torch.load(os.path.join("./weights", f"best_model_wo_lrs_{fold}.pt"), map_location=args.device)
         )
         test_results = val(net, val_loader_fold, loss_fn, args.device)
-
-        ## calculate overall (avg) conf & vizualization -----------------------
-        # Accumulate confusion matrix values for main model
-        TP_sum += test_results["TP"]
-        FP_sum += test_results["FP"]
-        TN_sum += test_results["TN"]
-        FN_sum += test_results["FN"]
-        ## plots
-        plot_confusion_matrix(test_results["TP"], test_results["FP"], test_results["TN"], test_results["FN"], 
-                              title=f"mainkfold_confusion_matrix_{fold}", filename=f"mainkfold_confusion_matrix_wo_lrs_{fold}.png")
-
-        # Accumulate confusion matrix values for MSA model
-        TP_msa_sum += test_results["TP_msa"]
-        FP_msa_sum += test_results["FP_msa"]
-        TN_msa_sum += test_results["TN_msa"]
-        FN_msa_sum += test_results["FN_msa"]
-        ## plots
-        plot_confusion_matrix(test_results["TP_msa"], test_results["FP_msa"], test_results["TN_msa"], test_results["FN_msa"], 
-                              title=f"mainkfold_msa_confusion_matrix_{fold}", filename=f"mainkfold_msa_confusion_matrix_wo_lrs_{fold}.png")
-
-        # Accumulate confusion matrix values for VTTEncoder model
-        TP_vtt_sum += test_results["TP_vtt"]
-        FP_vtt_sum += test_results["FP_vtt"]
-        TN_vtt_sum += test_results["TN_vtt"]
-        FN_vtt_sum += test_results["FN_vtt"]
-        ## plots
-        plot_confusion_matrix(test_results["TP_vtt"], test_results["FP_vtt"], test_results["TN_vtt"], test_results["FN_vtt"], 
-                              title=f"mainkfold_vtt_confusion_matrix_{fold}", filename=f"mainkfold_vtt_confusion_matrix_wo_lrs_{fold}.png")
-        ##-----------------------------------------------------------------
-
         fold_results.append(test_results)
         LOG_INFO(f"Fold {fold+1} test results: {fold_results[-1]}", mcolor='yellow')
-
-    ##------------------- avg confusion matrix--------------------------
-    # Compute the average confusion matrix for each model
-    TP_avg, FP_avg, TN_avg, FN_avg = round(TP_sum / 10), round(FP_sum / 10), round(TN_sum / 10), round(FN_sum / 10)
-    TP_msa_avg, FP_msa_avg, TN_msa_avg, FN_msa_avg = round(TP_msa_sum / 10), round(FP_msa_sum / 10), round(TN_msa_sum / 10), round(FN_msa_sum / 10)
-    TP_vtt_avg, FP_vtt_avg, TN_vtt_avg, FN_vtt_avg = round(TP_vtt_sum / 10), round(FP_vtt_sum / 10), round(TN_vtt_sum / 10), round(FN_vtt_sum / 10)
-
-    # Now you can use the previously provided code to plot the averaged confusion matrix
-    plot_confusion_matrix(TP_avg, FP_avg, TN_avg, FN_avg, 
-                          title="Main Model Averaged Confusion Matrix", filename="mainkfold_main_model_avg_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix(TP_msa_avg, FP_msa_avg, TN_msa_avg, FN_msa_avg, 
-                          title="MSA Model Averaged Confusion Matrix", filename="mainkfold_msa_avg_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix(TP_vtt_avg, FP_vtt_avg, TN_vtt_avg, FN_vtt_avg, 
-                          title="VTTEncoder Model Averaged Confusion Matrix", filename="mainkfold_vtt_avg_confusion_matrix_wo_lrs.png")
-
-    ##----------------------------------------
 
     print("============---------------================")
     LOG_INFO("Overall Folds Results for the test sets")
     LOG_INFO(f"All Results: {fold_results}")
 
-    # Aggregate results across folds
     avg_results = {
         "acc": np.mean([fr["acc"] for fr in fold_results]),
         "precision": np.mean([fr["precision"] for fr in fold_results]),
@@ -554,24 +522,6 @@ def main():
         "TN_vtt": round(np.mean([fr.get("TN_vtt", 0) for fr in fold_results])),
         "FN_vtt": round(np.mean([fr.get("FN_vtt", 0) for fr in fold_results])),
     }
-
-    # Now you can use the previously provided code to plot the averaged confusion matrix
-    plot_confusion_matrix(avg_results['TP'], avg_results['FP'], avg_results['TN'], avg_results['FN'], 
-                          title="AMMD Confusion Matrix", filename="mainkfold_ammd_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix(avg_results['TP_msa'], avg_results['FP_msa'], avg_results['TN_msa'], avg_results['FN_msa'],
-                          title="MSA Confusion Matrix", filename="mainkfold_msa_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix(avg_results['TP_vtt'], avg_results['FP_vtt'], avg_results['TN_vtt'], avg_results['FN_vtt'],
-                          title="VTTEncoder Confusion Matrix", filename="mainkfold_vtt_confusion_matrix_wo_lrs.png")
-
-
-    # Now you can use mean confusion matrix
-    plot_confusion_matrix_mean(avg_results['TP'], avg_results['FP'], avg_results['TN'], avg_results['FN'], 
-                          title="Mean AMMD Confusion Matrix", filename="mean_mainkfold_ammd_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix_mean(avg_results['TP_msa'], avg_results['FP_msa'], avg_results['TN_msa'], avg_results['FN_msa'],
-                          title="Mean MSA Confusion Matrix", filename="mean_mainkfold_msa_confusion_matrix_wo_lrs.png")
-    plot_confusion_matrix_mean(avg_results['TP_vtt'], avg_results['FP_vtt'], avg_results['TN_vtt'], avg_results['FN_vtt'],
-                          title="Mean VTTEncoder Confusion Matrix", filename="mean_mainkfold_vtt_confusion_matrix_wo_lrs.png")
-    ##-----------------------------------------------------------------
 
     LOG_INFO(f"Average cross-validated results: {avg_results}", mcolor='green')
     result_file = "final_results.log"

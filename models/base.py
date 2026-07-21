@@ -1,12 +1,8 @@
-# -*- coding: utf-8 -*-
-'''
-@author: Md Rezwanul Haque
-'''
-#---------------------------------------------------------------
-# Imports
-#---------------------------------------------------------------
+"""Abstract base class for feature extractor + classifier networks."""
+
 import abc
 import torch.nn as nn
+
 
 class BaseNet(nn.Module, abc.ABC):
 

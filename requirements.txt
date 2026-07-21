@@ -6,7 +6,5 @@ seaborn
 scikit-learn
 tqdm
 numpy
-umap-learn
 pyyaml
 termcolor
-scipy

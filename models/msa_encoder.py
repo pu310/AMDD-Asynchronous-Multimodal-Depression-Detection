@@ -1,13 +1,14 @@
-# -*- coding: utf-8 -*-
+"""MSA audio encoder with GSA attention and temporal pyramid features."""
+
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch import einsum
 from einops import rearrange
 from .base import BaseNet
 
-# GSA 和 calc_reindexing_tensor 代码保持不变...
+
 def calc_reindexing_tensor(l, L, device):
     x = torch.arange(l, device=device)[:, None, None]
     i = torch.arange(l, device=device)[None, :, None]
@@ -15,8 +16,8 @@ def calc_reindexing_tensor(l, L, device):
     mask = ((i - x) == r) & ((i - x).abs() <= L)
     return mask.float()
 
+
 class GSA(nn.Module):
-    # ... GSA类的代码保持不变，这里省略以保持简洁 ...
     def __init__(self, dim, *, rel_pos_length=None, dim_out=None, heads=8, dim_key=64, norm_queries=False, batch_norm=True):
         super().__init__()
         self.dim_out = dim_out if dim_out is not None else dim
@@ -52,57 +53,42 @@ class GSA(nn.Module):
         return self.to_out(content_out)
 
 
-# 【创新点 A START】新增 TemporalPyramid 模块
 class TemporalPyramid(nn.Module):
-    """
-    Captures multi-scale temporal dynamics using dilated convolutions.
-    """
+    """Multi-scale temporal dynamics via dilated convolutions."""
+
     def __init__(self, in_channels, out_channels, pyramid_channels=64):
         super().__init__()
-        # Branch 1: Captures local, fast changes (standard convolution)
         self.branch1 = nn.Sequential(
             nn.Conv1d(in_channels, pyramid_channels, kernel_size=3, padding=1, dilation=1),
             nn.BatchNorm1d(pyramid_channels),
             nn.ReLU()
         )
-        # Branch 2: Captures medium-scale temporal dependencies
         self.branch2 = nn.Sequential(
             nn.Conv1d(in_channels, pyramid_channels, kernel_size=3, padding=2, dilation=2),
             nn.BatchNorm1d(pyramid_channels),
             nn.ReLU()
         )
-        # Branch 3: Captures large-scale temporal dependencies
         self.branch3 = nn.Sequential(
             nn.Conv1d(in_channels, pyramid_channels, kernel_size=3, padding=4, dilation=4),
             nn.BatchNorm1d(pyramid_channels),
             nn.ReLU()
         )
-        # Final fusion layer
         self.fusion = nn.Conv1d(pyramid_channels * 3, out_channels, kernel_size=1)
         self.bn_fusion = nn.BatchNorm1d(out_channels)
 
     def forward(self, x):
-        # x shape: [B, in_channels, T]
         out1 = self.branch1(x)
         out2 = self.branch2(x)
         out3 = self.branch3(x)
-        
         out_cat = torch.cat([out1, out2, out3], dim=1)
-        fused_out = F.relu(self.bn_fusion(self.fusion(out_cat)))
-        return fused_out
-# 【创新点 A END】
+        return F.relu(self.bn_fusion(self.fusion(out_cat)))
 
 
 class MSAEncoder(BaseNet):
     def __init__(self, hidden_sizes=[256, 256], dropout=0.5, gsa_input=25, gsa_rel_pos_length=10):
         super().__init__()
-        
         self.gsa = GSA(dim=gsa_input, rel_pos_length=gsa_rel_pos_length)
-
-        # 【创新点 A】用 TemporalPyramid 替换掉原来的 bottleneck 层
         self.temporal_pyramid = TemporalPyramid(in_channels=gsa_input, out_channels=256)
-        
-        # This part is for the unimodal classifier branch
         self.adaptive_pool = nn.AdaptiveAvgPool1d(96)
         self.classifier_msa = nn.Sequential(
             nn.Linear(256 * 96, 128),
@@ -125,19 +111,12 @@ class MSAEncoder(BaseNet):
             init.constant_(m.bias, 0)
 
     def feature_extractor(self, x):
-        # x shape: [B, T, C=25]
-        gsa_out = self.gsa(x) # Output shape: [B, C=25, T]
-
-        # 【创新点 A】通过时间金字塔提取多尺度动态特征
-        temporal_features = self.temporal_pyramid(gsa_out) # Output shape: [B, 256, T]
-        
-        # 为单模态分类器准备输入
+        gsa_out = self.gsa(x)
+        temporal_features = self.temporal_pyramid(gsa_out)
         pooled_features = self.adaptive_pool(temporal_features)
         pooled_features = pooled_features.view(pooled_features.size(0), -1)
-        
         return temporal_features, pooled_features
 
     def classifier(self, x):
         msa_sequence_features, msa_pooled_features = x
-        # 返回序列特征给主模型，和单模态分类结果
         return msa_sequence_features, self.classifier_msa(msa_pooled_features)

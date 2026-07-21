@@ -1,1 +1,3 @@
+"""Utility package: visualization helpers."""
+
 from .viz import plot_confusion_matrix, plot_confusion_matrix_mean

@@ -228,7 +228,7 @@ def main():
         train_loader_fold = DataLoader(train_subset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
         val_loader_fold = DataLoader(val_subset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
-        net = AMDD(d=256, l=8, temporal_kernel_size=6)
+        net = AMDD(d=256, l=8, temporal_kernel_size=7)
         net = net.to(args.device[0])
         if len(args.device) > 1:
             net = torch.nn.DataParallel(net, device_ids=args.device)

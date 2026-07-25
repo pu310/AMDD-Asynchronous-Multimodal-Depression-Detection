@@ -14,6 +14,6 @@ device: "cuda:0"
 
 # model hyper-parameters
 encoder_layers: 8
-kernel_size: 6
+kernel_size: 7
 loss_main_weight: 0.9
 loss_aux_weight: 0.05

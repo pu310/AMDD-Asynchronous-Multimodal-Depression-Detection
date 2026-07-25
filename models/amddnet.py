@@ -12,7 +12,7 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 
 
 class AMDD(BaseNet):
-    def __init__(self, d=256, l=8, temporal_kernel_size=6, target_seq_len=64):
+    def __init__(self, d=256, l=8, temporal_kernel_size=7, target_seq_len=64):
         super().__init__()
 
         self.target_seq_len = target_seq_len

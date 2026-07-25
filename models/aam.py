@@ -7,7 +7,7 @@ import torch.nn as nn
 class AAM(nn.Module):
     """Bidirectional cross-attention with temporal shift for audio-visual fusion."""
 
-    def __init__(self, d=256, f_d=512, l=8, temporal_kernel_size=6):
+    def __init__(self, d=256, f_d=512, l=8, temporal_kernel_size=7):
         super().__init__()
 
         self.v_encoder = nn.TransformerEncoder(

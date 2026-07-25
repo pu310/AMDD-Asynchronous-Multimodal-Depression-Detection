@@ -108,7 +108,7 @@ def parse_args():
         help="Number of Transformer encoder layers"
     )
     parser.add_argument(
-        "-ks", "--kernel_size", type=int, default=6,
+        "-ks", "--kernel_size", type=int, default=7,
         help="Temporal convolution kernel size"
     )
     parser.add_argument(
